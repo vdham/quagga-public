@@ -30,7 +30,7 @@ AM_LDFLAGS = $(PILDFLAGS)
 
 sbin_PROGRAMS = zebra
 
-noinst_PROGRAMS = testzebra
+#noinst_PROGRAMS = testzebra
 
 mpls_sources=
 mpls_headers=

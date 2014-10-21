@@ -54,7 +54,8 @@ static int
 if_mpls_enabled (struct interface *ifp)
 {
   struct zebra_if *zebra_if = ifp->info;
-  return zebra_if->mpls_enabled && mpls_enabled;
+  //return zebra_if->mpls_enabled && mpls_enabled;
+  return mpls_enabled;
 }
 
 struct route_node *
@@ -115,18 +116,29 @@ zebra_route_node_active (struct route_node *rn)
 }
 
 static void
-mpls_install_lsps (struct label_bindings *lb)
+mpls_install_lsps (struct prefix *p, struct label_bindings *lb)
 {
   struct listnode *node;
   struct mpls_lsp *lsp;
 
+  for (ALL_LIST_ELEMENTS_RO (lb->selected_lsps, node, lsp))
+     {
+	  struct in_addr match_ip;
+	     //match_ip.s_addr = inet_addr (&(p->u.prefix));
+	     memcpy (&(match_ip.s_addr), &(p->u.prefix), sizeof (struct in_addr));
+     }
   /* Disconsider FECs with undefined MPLS input label. */
-  if (lb->selected_in_label == NO_LABEL)
+  if (lb->selected_in_label == NO_LABEL){
     return;
+  }
 
   /* Disconsider FECs with Implicit Null as the MPLS input label. */
   if (lb->selected_in_label == MPLS_IMPLICIT_NULL)
+  {
+    mpls_kernel_install_ilm (lb->selected_in_label, 0);
+
     return;
+  }
 
   /* Special case: there's no output label defined for this FEC.
    * When a packet arrives with this FEC's input label, the kernel should
@@ -134,9 +146,9 @@ mpls_install_lsps (struct label_bindings *lb)
   if (list_isempty (lb->selected_lsps))
     {
       if (! lb->no_label_installed &&
-	  mpls_kernel_install_ilm (lb->selected_in_label, NULL) >= 0)
+	  mpls_kernel_install_ilm (lb->selected_in_label, 0) >= 0)
 	lb->no_label_installed = 1;
-      return;
+    return;
     }
 
   for (ALL_LIST_ELEMENTS_RO (lb->selected_lsps, node, lsp))
@@ -205,7 +217,10 @@ mpls_prefix_update_input_label (struct route_node *rn)
 
   /* Update LFIB. */
   if (rib)
-    mpls_install_lsps (lb);
+  {
+	mpls_install_lsps (&rn->p, lb);
+  }
+
 
   /* Free mpls information if possible */
   if (lb->static_in_label == NO_LABEL &&
@@ -255,7 +270,7 @@ mpls_prefix_update_lsps (struct route_node *rn)
   struct rib *rib;
   struct nexthop *nexthop;
   struct listnode *node;
-  struct mpls_lsp *lsp;
+  struct mpls_lsp *lsp, *lsp1;
   struct in_addr addr;
 
   lb = rn->mpls;
@@ -282,23 +297,29 @@ mpls_prefix_update_lsps (struct route_node *rn)
       if (! CHECK_FLAG (nexthop->flags, NEXTHOP_FLAG_RECURSIVE) &&
 	  (nexthop->type == NEXTHOP_TYPE_IPV4 ||
 	   nexthop->type == NEXTHOP_TYPE_IPV4_IFINDEX ||
-	   nexthop->type == NEXTHOP_TYPE_IPV4_IFNAME))
+	   nexthop->type == NEXTHOP_TYPE_IPV4_IFNAME)){
 	addr.s_addr = nexthop->gate.ipv4.s_addr;
+      }
       else if (CHECK_FLAG (nexthop->flags, NEXTHOP_FLAG_RECURSIVE) &&
 	       (nexthop->rtype == NEXTHOP_TYPE_IPV4 ||
 		nexthop->rtype == NEXTHOP_TYPE_IPV4_IFINDEX ||
-		nexthop->rtype == NEXTHOP_TYPE_IPV4_IFNAME))
+		nexthop->rtype == NEXTHOP_TYPE_IPV4_IFNAME)) {
 	addr.s_addr = nexthop->rgate.ipv4.s_addr;
+      }
       else
 	continue;
-
       /* LDP LSPs take precedence against static LSPs */
       for (ALL_LIST_ELEMENTS_RO (lb->ldp_lsps, node, lsp))
 	if (lsp->addr.s_addr == addr.s_addr)
 	  {
 	    lsp->ifp = if_lookup_address (lsp->addr);
-	    if (!lsp->ifp || !if_mpls_enabled (lsp->ifp))
+	    if (!lsp->ifp) {
+	    }
+	    if (!if_mpls_enabled (lsp->ifp)){
+	    }
+	    if (!lsp->ifp || !if_mpls_enabled (lsp->ifp)){
 	      continue;
+	    }
 
 	    nexthop->lsp = lsp;
 	    listnode_add (lb->selected_lsps, lsp);
@@ -321,7 +342,13 @@ nexthop_next:;
     }
 
   /* Update LFIB/FIB */
-  mpls_install_lsps (lb);
+  for (ALL_LIST_ELEMENTS_RO (lb->selected_lsps, node, lsp1))
+      {
+		 if ((lsp1 != NULL && !lsp1->installed)) {
+			  mpls_kernel_install_ftn  (&rn->p, lsp1->remote_label, lsp1->addr);
+		  }
+      }
+  mpls_install_lsps (&rn->p, lb);
   kernel_change_ipv4 (&rn->p, rib);
 }
 

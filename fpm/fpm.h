@@ -133,6 +133,10 @@ typedef enum fpm_msg_type_e_ {
    * message.
    */
   FPM_MSG_TYPE_NETLINK = 1,
+
+  FPM_MSG_TYPE_NHLFE   = 2,
+
+  FPM_MSG_TYPE_FTN     = 3,
 } fpm_msg_type_e;
 
 /*

@@ -25,10 +25,13 @@
 #ifndef _ZEBRA_FPM_H
 #define _ZEBRA_FPM_H
 
+#include "zebra/mpls_msg.h"
 /*
  * Externs.
  */
 extern int zfpm_init (struct thread_master *master, int enable, uint16_t port);
 extern void zfpm_trigger_update (struct route_node *rn, const char *reason);
+extern void zfpm_trigger_nhlfe_update (nhlfe_msg_t *nhlfe, int len, const char *reason);
+extern void zfpm_trigger_ftn_update (ftn_msg_t *ftn, int len, const char *reason);
 
 #endif /* _ZEBRA_FPM_H */

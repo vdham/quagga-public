@@ -231,6 +231,8 @@ typedef struct zfpm_glob_t_
    */
   time_t last_stats_clear_time;
 
+  TAILQ_HEAD (zfpm_mpls_q, mpls_msg_t) mpls_q;
+
 } zfpm_glob_t;
 
 static zfpm_glob_t zfpm_glob_space;
@@ -242,7 +244,7 @@ static int zfpm_write_cb (struct thread *thread);
 static void zfpm_set_state (zfpm_state_t state, const char *reason);
 static void zfpm_start_connect_timer (const char *reason);
 static void zfpm_start_stats_timer (void);
-
+static void zfpm_build_mpls_updates (void);
 /*
  * zfpm_thread_should_yield
  */
@@ -1040,10 +1042,14 @@ zfpm_write_cb (struct thread *thread)
        * If the stream is empty, try fill it up with data.
        */
       if (stream_empty (s))
-	{
-	  zfpm_build_updates ();
-	}
+	  {
+	    zfpm_build_updates ();
+	  }
 
+      if (stream_empty (s))
+      {
+         zfpm_build_mpls_updates ();
+       }
       bytes_to_write = stream_get_endp (s) - stream_get_getp (s);
       if (!bytes_to_write)
 	break;
@@ -1542,6 +1548,7 @@ zfpm_init (struct thread_master *master, int enable, uint16_t port)
   memset (zfpm_g, 0, sizeof (*zfpm_g));
   zfpm_g->master = master;
   TAILQ_INIT(&zfpm_g->dest_q);
+  TAILQ_INIT(&zfpm_g->mpls_q);
   zfpm_g->sock = -1;
   zfpm_g->state = ZFPM_STATE_IDLE;
 
@@ -1579,3 +1586,146 @@ zfpm_init (struct thread_master *master, int enable, uint16_t port)
 
   return 1;
 }
+
+void
+zfpm_trigger_nhlfe_update (nhlfe_msg_t *nhlfe, int nhlfe_len, const char *reason)
+{
+
+  mpls_msg_t *mpls_msg = malloc (sizeof(mpls_msg_t));
+
+  memset (mpls_msg, sizeof (mpls_msg_t), 0);
+  mpls_msg->data = (char *) malloc (nhlfe_len);
+  memcpy (mpls_msg->data, nhlfe, nhlfe_len);
+  mpls_msg->len = nhlfe_len;
+  mpls_msg->type = NHLFE;
+  TAILQ_INSERT_TAIL (&zfpm_g->mpls_q, mpls_msg, fpm_q_entries);
+  zfpm_g->stats.updates_triggered++;
+
+  /*
+   * Ignore if the connection is down. We will update the FPM about
+   * all destinations once the connection comes up.
+   */
+  if (!zfpm_conn_is_up ())
+  {
+	  return;
+  }
+
+  /*
+   * Make sure that writes are enabled.
+   */
+  if (zfpm_g->t_write)
+  {
+    return;
+  }
+
+  zfpm_write_on ();
+}
+
+void
+zfpm_trigger_ftn_update (ftn_msg_t *ftn, int len, const char *reason)
+{
+
+  mpls_msg_t *mpls_msg = malloc (sizeof(mpls_msg_t));
+  memset (mpls_msg, sizeof (mpls_msg_t), 0);
+  mpls_msg->data = (char *) malloc (len);
+  memset (mpls_msg->data, len, 0);
+  memcpy (mpls_msg->data, ftn, len);
+  mpls_msg->len = len;
+  mpls_msg->type = FTN;
+  TAILQ_INSERT_TAIL (&zfpm_g->mpls_q, mpls_msg, fpm_q_entries);
+  zfpm_g->stats.updates_triggered++;
+
+  /*
+   * Ignore if the connection is down. We will update the FPM about
+   * all destinations once the connection comes up.
+   */
+  if (!zfpm_conn_is_up ())
+    return;
+
+  /*
+   * Make sure that writes are enabled.
+   */
+  if (zfpm_g->t_write)
+    return;
+
+  zfpm_write_on ();
+}
+
+static void
+zfpm_build_mpls_updates (void)
+{
+  struct stream *s;
+  mpls_msg_t *mpls_msg;
+  unsigned char *buf, *data, *buf_end;
+  size_t msg_len;
+  size_t data_len;
+  fpm_msg_hdr_t *hdr;
+  struct rib *rib;
+  int is_add, write_msg;
+
+  s = zfpm_g->obuf;
+
+  do {
+
+    /*
+     * Make sure there is enough space to write another message.
+     */
+    if (STREAM_WRITEABLE (s) < FPM_MAX_MSG_LEN)
+      break;
+
+    buf = STREAM_DATA (s) + stream_get_endp (s);
+    buf_end = buf + STREAM_WRITEABLE (s);
+
+    mpls_msg = TAILQ_FIRST (&zfpm_g->mpls_q);
+    if (!mpls_msg)
+      break;
+    zfpm_debug ("Obtained mpls message from the mpls_q");
+    //assert (CHECK_FLAG (mpls_msg->flags, RIB_DEST_UPDATE_FPM));
+
+    hdr = (fpm_msg_hdr_t *) buf;
+    hdr->version = FPM_PROTO_VERSION;
+    if (mpls_msg->type == FTN)
+    {
+    	hdr->msg_type =  FPM_MSG_TYPE_FTN;
+    } else if (mpls_msg->type == NHLFE)
+    {
+    	hdr->msg_type =  FPM_MSG_TYPE_NHLFE;
+    }
+
+    data = fpm_msg_data (hdr);
+    write_msg = 1;
+
+    if (write_msg) {
+
+	  msg_len = fpm_data_len_to_msg_len (mpls_msg->len);
+	  hdr->msg_len = htons (msg_len);
+	  memcpy (data, mpls_msg->data, mpls_msg->len);
+	  stream_forward_endp (s, msg_len);
+    }
+
+    /*
+     * Remove the dest from the queue, and reset the flag.
+     */
+
+    TAILQ_REMOVE (&zfpm_g->mpls_q, mpls_msg, fpm_q_entries);
+
+    if (is_add)
+      {
+	//SET_FLAG (mpls_msg->flags, RIB_DEST_SENT_TO_FPM);
+      }
+    else
+      {
+	//UNSET_FLAG (mpls_msg->flags, RIB_DEST_SENT_TO_FPM);
+      }
+
+    /*
+     * Delete the destination if necessary.
+     */
+   free (mpls_msg->data);
+   free (mpls_msg);
+
+  } while (1);
+
+}
+
+
